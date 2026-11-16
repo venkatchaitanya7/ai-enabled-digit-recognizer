@@ -22,6 +22,7 @@
       font-weight: 800;
       margin: 0 0 6px 0;
       background: linear-gradient(135deg, #38bdf8 0%, #06b6d4 100%);
+      background-clip: text;
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       text-shadow: 0 0 20px rgba(6, 182, 212, 0.25);
@@ -34,7 +35,7 @@
     .dashboard {
       display: flex;
       gap: 20px;
-      max-width: 1100px;
+      max-width: 1200px;
       width: 100%;
       flex-wrap: wrap;
       justify-content: center;
@@ -48,7 +49,7 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      width: 300px;
+      width: 280px;
     }
     .card-title {
       font-size: 1.1rem;
@@ -63,7 +64,7 @@
       display: block;
       cursor: crosshair;
     }
-    .camera-container {
+    .camera-container, .upload-container {
       position: relative;
       width: 280px;
       height: 280px;
@@ -71,6 +72,10 @@
       border-radius: 10px;
       overflow: hidden;
       border: 2px solid #334155;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      box-sizing: border-box;
     }
     #videoFeed {
       width: 100%;
@@ -89,6 +94,46 @@
       pointer-events: none;
       box-sizing: border-box;
     }
+    
+    /* Drag & Drop Upload Styles */
+    .upload-zone {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      cursor: pointer;
+      padding: 20px;
+      box-sizing: border-box;
+      text-align: center;
+      border: 2px dashed #475569;
+      border-radius: 10px;
+      transition: all 0.2s ease;
+      background: #030712;
+    }
+    .upload-zone:hover, .upload-zone.dragover {
+      border-color: #06b6d4;
+      background: rgba(6, 182, 212, 0.05);
+    }
+    .upload-icon {
+      font-size: 2.5rem;
+      margin-bottom: 10px;
+    }
+    .upload-text {
+      font-size: 0.85rem;
+      color: #94a3b8;
+    }
+    #imagePreview {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: none;
+    }
+    #fileInput {
+      display: none;
+    }
+
     .button-group {
       display: flex;
       gap: 10px;
@@ -170,7 +215,7 @@
 <body>
 
   <h1>A.I. DIGIT RECOGNIZER</h1>
-  <p class="subtitle">Draw on the canvas or hold a digit inside the camera box</p>
+  <p class="subtitle">Draw on the canvas, capture a photo, or upload an image file</p>
 
   <div class="dashboard">
     <!-- 1. Canvas -->
@@ -178,8 +223,8 @@
       <div class="card-title">✏️ Digital Canvas</div>
       <canvas id="digitCanvas" width="280" height="280"></canvas>
       <div class="button-group">
-        <button class="btn-secondary" id="clearBtn" onclick="resetCanvas()">Clear</button>
-        <button class="btn-action" id="predictCanvasBtn" onclick="analyzeCanvas()">Analyze Canvas</button>
+        <button class="btn-secondary" onclick="resetCanvas()">Clear</button>
+        <button class="btn-action" onclick="analyzeCanvas()">Analyze</button>
       </div>
     </div>
 
@@ -192,11 +237,28 @@
       </div>
       <div class="button-group">
         <button class="btn-secondary" id="cameraToggleBtn" onclick="toggleCamera()">Start Cam</button>
-        <button class="btn-action" id="predictCameraBtn" onclick="analyzeCamera()">Analyze Camera</button>
+        <button class="btn-action" onclick="analyzeCamera()">Analyze</button>
       </div>
     </div>
 
-    <!-- 3. Result Engine -->
+    <!-- 3. Image Upload -->
+    <div class="card">
+      <div class="card-title">📤 Upload Image</div>
+      <div class="upload-container">
+        <div class="upload-zone" id="uploadZone" onclick="triggerFileSelect()">
+          <div class="upload-icon" id="uploadIcon">🖼️</div>
+          <div class="upload-text" id="uploadText">Click or Drag Image Here<br><span style="font-size: 0.7rem; color: #475569;">PNG, JPG up to 5MB</span></div>
+          <img id="imagePreview" alt="Upload Preview">
+        </div>
+        <input type="file" id="fileInput" accept="image/*" onchange="handleFileSelect(event)">
+      </div>
+      <div class="button-group">
+        <button class="btn-secondary" onclick="clearUpload()">Clear</button>
+        <button class="btn-action" onclick="analyzeUpload()">Analyze</button>
+      </div>
+    </div>
+
+    <!-- 4. Result Engine -->
     <div class="card result-card">
       <div class="card-title">🔮 Prediction Engine</div>
       <div class="predicted-number" id="outputDigit">-</div>
@@ -209,6 +271,8 @@
     </div>
   </div>
 
+  <canvas id="hiddenCanvas" width="280" height="280" style="display:none;"></canvas>
+
   <script>
     const canvas = document.getElementById("digitCanvas");
     const ctx = canvas.getContext("2d");
@@ -216,8 +280,13 @@
     const cameraBtn = document.getElementById("cameraToggleBtn");
     const debugCanvas = document.getElementById("debugCanvas");
     const debugCtx = debugCanvas.getContext("2d");
+    const uploadZone = document.getElementById("uploadZone");
+    const fileInput = document.getElementById("fileInput");
+    const imagePreview = document.getElementById("imagePreview");
+    
     let drawing = false;
     let stream = null;
+    let uploadedImageBase64 = null;
 
     function resetCanvas() {
       ctx.fillStyle = "#000000";
@@ -226,18 +295,22 @@
       ctx.lineWidth = 18;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      document.getElementById("outputDigit").innerText = "-";
-      document.getElementById("outputConfidence").innerText = "Confidence: -";
+      resetOutputs();
     }
     resetCanvas();
 
+    function resetOutputs() {
+      document.getElementById("outputDigit").innerText = "-";
+      document.getElementById("outputConfidence").innerText = "Confidence: -";
+    }
+
+    // === Canvas Drawing Mechanics ===
     function getPos(e) {
       const rect = canvas.getBoundingClientRect();
       const clientX = e.touches ? e.touches[0].clientX : e.clientX;
       const clientY = e.touches ? e.touches[0].clientY : e.clientY;
       return { x: clientX - rect.left, y: clientY - rect.top };
     }
-
     function startDraw(e) {
       drawing = true;
       const pos = getPos(e);
@@ -259,6 +332,7 @@
     canvas.addEventListener("touchmove", (e) => { e.preventDefault(); draw(e); }, { passive: false });
     canvas.addEventListener("touchend", (e) => { e.preventDefault(); stopDraw(); }, { passive: false });
 
+    // === Camera Integration ===
     async function toggleCamera() {
       if (stream) {
         stream.getTracks().forEach(t => t.stop());
@@ -279,6 +353,62 @@
       }
     }
 
+    // === Image Upload drag/drop ===
+    function triggerFileSelect() {
+      fileInput.click();
+    }
+
+    function handleFileSelect(e) {
+      const file = e.target.files[0];
+      if (file) {
+        processUploadFile(file);
+      }
+    }
+
+    function processUploadFile(file) {
+      if (!file.type.match('image.*')) {
+        alert("Please select a valid image file.");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        uploadedImageBase64 = e.target.result;
+        imagePreview.src = uploadedImageBase64;
+        imagePreview.style.display = "block";
+        document.getElementById("uploadIcon").style.display = "none";
+        document.getElementById("uploadText").style.display = "none";
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Drag-over hover indicators
+    uploadZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      uploadZone.classList.add("dragover");
+    });
+    uploadZone.addEventListener("dragleave", () => {
+      uploadZone.classList.remove("dragover");
+    });
+    uploadZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      uploadZone.classList.remove("dragover");
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        processUploadFile(file);
+      }
+    });
+
+    function clearUpload() {
+      uploadedImageBase64 = null;
+      imagePreview.src = "";
+      imagePreview.style.display = "none";
+      document.getElementById("uploadIcon").style.display = "block";
+      document.getElementById("uploadText").style.display = "block";
+      fileInput.value = "";
+      resetOutputs();
+    }
+
+    // === Prediction Request Transmitter ===
     async function sendPrediction(base64Image, isCamera = false) {
       const outDigit = document.getElementById("outputDigit");
       const outConf = document.getElementById("outputConfidence");
@@ -324,11 +454,9 @@
         alert("Please turn on your camera first!");
         return;
       }
-
-      // Calculate the exact center square of the raw video stream
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-      const squareSize = Math.min(vw, vh) * 0.7; // Take central 70%
+      const squareSize = Math.min(vw, vh) * 0.7;
       const startX = (vw - squareSize) / 2;
       const startY = (vh - squareSize) / 2;
 
@@ -336,11 +464,19 @@
       capCanvas.width = 280;
       capCanvas.height = 280;
       const capCtx = capCanvas.getContext("2d");
-
-      // Draw the unmirrored center crop directly
       capCtx.drawImage(video, startX, startY, squareSize, squareSize, 0, 0, 280, 280);
 
       sendPrediction(capCanvas.toDataURL("image/png"), true);
+    }
+
+    function analyzeUpload() {
+      if (!uploadedImageBase64) {
+        alert("Please upload or drag an image first!");
+        return;
+      }
+      // Since uploaded pictures consist of pen strokes on paper background,
+      // we run it through the exact same adaptive contrast filter as the camera feed!
+      sendPrediction(uploadedImageBase64, true);
     }
   </script>
 </body>
