@@ -7,6 +7,9 @@ from PIL import Image, ImageOps, ImageFilter
 from flask import Flask, render_template, request, jsonify
 from model import DigitCNN
 
+from PIL import ImageFile
+ImageFile.Load_TRUNCATED_IMAGES = True
+
 app = Flask(__name__)
 
 # Load trained AI model
