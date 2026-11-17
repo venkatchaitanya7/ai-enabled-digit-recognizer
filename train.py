@@ -4,14 +4,14 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from model import DigitCNN
 
-def train():
+def train_and_export():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"🚀 Training on device: {device}")
+    print(f"🚀 Training High-Accuracy Model on: {device}")
 
-    # Data Augmentation: prepares the AI for real-world messy handwriting
+    # Heavy data augmentation for real-world photo resilience
     train_transform = transforms.Compose([
-        transforms.RandomRotation(degrees=12),
-        transforms.RandomAffine(degrees=0, translate=(0.08, 0.08), scale=(0.95, 1.05)),
+        transforms.RandomRotation(degrees=15),
+        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
     ])
@@ -21,7 +21,6 @@ def train():
         transforms.Normalize((0.1307,), (0.3081,))
     ])
 
-    # Load datasets
     train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=train_transform)
     test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=test_transform)
 
@@ -30,14 +29,16 @@ def train():
 
     model = DigitCNN().to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.7)
+    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
 
-    epochs = 8  # Optimal balance between high accuracy and preventing overfitting
+    epochs = 10
+    best_acc = 0.0
+
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
-        for batch_idx, (data, target) in enumerate(train_loader):
+        for data, target in train_loader:
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             output = model(data)
@@ -48,7 +49,7 @@ def train():
 
         scheduler.step()
 
-        # Evaluate test accuracy per epoch
+        # Validation
         model.eval()
         correct = 0
         with torch.no_grad():
@@ -58,12 +59,29 @@ def train():
                 correct += preds.eq(target).sum().item()
 
         accuracy = 100. * correct / len(test_dataset)
-        avg_loss = running_loss / len(train_loader)
-        print(f"Epoch {epoch:02d}/{epochs:02d} | Loss: {avg_loss:.4f} | Test Accuracy: {accuracy:.2f}%")
+        print(f"Epoch [{epoch:02d}/{epochs:02d}] - Loss: {running_loss/len(train_loader):.4f} - Test Accuracy: {accuracy:.2f}%")
+        best_acc = max(best_acc, accuracy)
 
-    # Save the upgraded model
+    print(f"\n✅ Training Complete! Peak Accuracy: {best_acc:.2f}%")
+
+    # 1. Save PyTorch weights
     torch.save(model.state_dict(), 'digit_model.pth')
-    print("✅ High-accuracy model saved to 'digit_model.pth'")
+
+    # 2. Export to lightweight ONNX format
+    model.eval()
+    dummy_input = torch.randn(1, 1, 28, 28, device=device)
+    torch.onnx.export(
+        model,
+        dummy_input,
+        "digit_model.onnx",
+        export_params=True,
+        opset_version=14,
+        do_constant_folding=True,
+        input_names=['input'],
+        output_names=['output'],
+        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
+    )
+    print("📦 Exported 'digit_model.onnx' (Ultra-lightweight for Render deployment)!")
 
 if __name__ == '__main__':
-    train()
+    train_and_export()

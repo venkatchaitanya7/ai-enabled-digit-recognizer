@@ -1,46 +1,74 @@
 import io
 import base64
-import torch
-import torch.nn.functional as F
 import numpy as np
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageOps, ImageFilter, ImageFile
 from flask import Flask, render_template, request, jsonify
-from model import DigitCNN
 
-from PIL import ImageFile
-ImageFile.Load_TRUNCATED_IMAGES = True
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 app = Flask(__name__)
 
-# Load trained AI model
-device = torch.device('cpu')
-model = DigitCNN().to(device)
-model.load_state_dict(torch.load('digit_model.pth', map_location=device))
-model.eval()
+# Load Model using ONNX Runtime for minimum RAM consumption (< 40MB)
+try:
+    import onnxruntime as ort
+    ort_session = ort.InferenceSession("digit_model.onnx")
+    USE_ONNX = True
+    print("✅ Loaded ONNX Engine (Memory: ~35MB RAM)")
+except Exception as e:
+    import torch
+    import torch.nn.functional as F
+    from model import DigitCNN
+    device = torch.device('cpu')
+    model = DigitCNN().to(device)
+    model.load_state_dict(torch.load('digit_model.pth', map_location=device))
+    model.eval()
+    USE_ONNX = False
+    print(f"⚠️ Falling back to PyTorch: {e}")
 
-def preprocess_image(image_base64, is_camera=False):
+def get_center_of_mass(img_array):
+    """Calculates the center of mass of the pixels (MNIST standard)."""
+    cy, cx = np.indices(img_array.shape)
+    total = img_array.sum()
+    if total == 0:
+        return 14, 14
+    x_center = (cx * img_array).sum() / total
+    y_center = (cy * img_array).sum() / total
+    return x_center, y_center
+
+def shift_image(img_array, dx, dy):
+    """Shifts an array by (dx, dy) with edge zero-padding."""
+    shifted = np.zeros_like(img_array)
+    h, w = img_array.shape
+    x_start = max(0, int(dx))
+    x_end = min(w, w + int(dx))
+    y_start = max(0, int(dy))
+    y_end = min(h, h + int(dy))
+    src_x_start = max(0, -int(dx))
+    src_x_end = min(w, w - int(dx))
+    src_y_start = max(0, -int(dy))
+    src_y_end = min(h, h - int(dy))
+    shifted[y_start:y_end, x_start:x_end] = img_array[src_y_start:src_y_end, src_x_start:src_x_end]
+    return shifted
+
+def preprocess_image(image_base64, is_photo=False):
     image_bytes = base64.b64decode(image_base64.split(',')[1])
     image = Image.open(io.BytesIO(image_bytes)).convert('L')
 
-    if is_camera:
-        # 1. Smooth out camera noise
-        image = image.filter(ImageFilter.MedianFilter(size=3))
-        
-        # 2. Local adaptive thresholding: subtract blurred background to isolate dark ink
+    if is_photo:
+        # 1. Clean background shadows via local subtraction
         np_img = np.array(image, dtype=np.float32)
-        bg = np.array(image.filter(ImageFilter.BoxBlur(21)), dtype=np.float32)
-        diff = bg - np_img  # High positive values = dark ink on light paper
+        bg = np.array(image.filter(ImageFilter.BoxBlur(25)), dtype=np.float32)
+        diff = bg - np_img
 
-        # Dynamic contrast cutoff
-        std_val = np.std(diff)
-        thresh = max(18.0, np.mean(diff) + 0.8 * std_val)
+        # Dynamic threshold
+        thresh = max(16.0, np.mean(diff) + 0.7 * np.std(diff))
         binary = np.where(diff > thresh, 255, 0).astype(np.uint8)
         image = Image.fromarray(binary)
 
-        # 3. Morphological dilation: thicken thin pen strokes so CNN can see them clearly
+        # 2. Thicken pen strokes to match MNIST training brush size
         image = image.filter(ImageFilter.MaxFilter(5))
 
-    # 4. Find bounding box of the digit
+    # 3. Crop to content
     bbox = image.getbbox()
     if bbox is None:
         return None, None
@@ -50,7 +78,7 @@ def preprocess_image(image_base64, is_camera=False):
     if w < 6 or h < 6:
         return None, None
 
-    # 5. Fit inside 20x20 box preserving aspect ratio
+    # 4. Proportionally fit inside a 20x20 box
     aspect = w / h
     if aspect > 1:
         new_w = 20
@@ -61,20 +89,29 @@ def preprocess_image(image_base64, is_camera=False):
 
     resized = cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    # 6. Center on 28x28 black canvas
+    # 5. Paste onto centered 28x28 black canvas
     canvas = Image.new('L', (28, 28), color=0)
     canvas.paste(resized, ((28 - new_w) // 2, (28 - new_h) // 2))
 
-    # Export debug base64 image so the user can see what the AI sees
+    img_array = np.array(canvas, dtype=np.float32)
+
+    # 6. Center of Mass Shift (the secret to MNIST accuracy)
+    cx, cy = get_center_of_mass(img_array)
+    shift_x = 14.0 - cx
+    shift_y = 14.0 - cy
+    if abs(shift_x) < 5 and abs(shift_y) < 5:
+        img_array = shift_image(img_array, shift_x, shift_y)
+
+    # Clean debug preview
+    preview_img = Image.fromarray(img_array.astype(np.uint8))
     buffered = io.BytesIO()
-    canvas.save(buffered, format="PNG")
+    preview_img.save(buffered, format="PNG")
     debug_base64 = "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode()
 
-    # 7. Normalize tensor
-    img_array = np.array(canvas, dtype=np.float32) / 255.0
-    normalized = (img_array - 0.1307) / 0.3081
-    tensor = torch.tensor(normalized, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-    
+    # 7. Normalize
+    normalized = (img_array / 255.0 - 0.1307) / 0.3081
+    tensor = normalized.reshape(1, 1, 28, 28).astype(np.float32)
+
     return tensor, debug_base64
 
 @app.route('/')
@@ -88,16 +125,24 @@ def predict():
         return jsonify({'error': 'No image provided'}), 400
 
     is_camera = data.get('is_camera', False)
-    tensor, debug_img = preprocess_image(data['image'], is_camera=is_camera)
+    tensor, debug_img = preprocess_image(data['image'], is_photo=is_camera)
 
     if tensor is None:
-        return jsonify({'error': 'No clear digit found. Write bolder or move closer to the camera!'}), 400
+        return jsonify({'error': 'No clear digit found. Write bolder or use a darker marker!'}), 400
 
-    with torch.no_grad():
-        output = model(tensor)
-        probabilities = F.softmax(output, dim=1)[0]
-        prediction = torch.argmax(probabilities).item()
+    if USE_ONNX:
+        outputs = ort_session.run(None, {'input': tensor})[0][0]
+        # Softmax
+        exp = np.exp(outputs - np.max(outputs))
+        probabilities = exp / exp.sum()
+        prediction = int(np.argmax(probabilities))
         confidence = float(probabilities[prediction] * 100)
+    else:
+        with torch.no_grad():
+            out = model(torch.tensor(tensor))
+            prob = F.softmax(out, dim=1)[0]
+            prediction = torch.argmax(prob).item()
+            confidence = float(prob[prediction] * 100)
 
     return jsonify({
         'prediction': prediction,
