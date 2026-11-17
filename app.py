@@ -3,27 +3,18 @@ import base64
 import numpy as np
 from PIL import Image, ImageOps, ImageFilter, ImageFile
 from flask import Flask, render_template, request, jsonify
+import onnxruntime as ort
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 app = Flask(__name__)
 
-# Load Model using ONNX Runtime for minimum RAM consumption (< 40MB)
+# Load Model using ONNX Runtime for minimum RAM consumption (< 35MB)
 try:
-    import onnxruntime as ort
     ort_session = ort.InferenceSession("digit_model.onnx")
-    USE_ONNX = True
     print("✅ Loaded ONNX Engine (Memory: ~35MB RAM)")
 except Exception as e:
-    import torch
-    import torch.nn.functional as F
-    from model import DigitCNN
-    device = torch.device('cpu')
-    model = DigitCNN().to(device)
-    model.load_state_dict(torch.load('digit_model.pth', map_location=device))
-    model.eval()
-    USE_ONNX = False
-    print(f"⚠️ Falling back to PyTorch: {e}")
+    print(f"❌ Failed to load ONNX model: {e}")
 
 def get_center_of_mass(img_array):
     """Calculates the center of mass of the pixels (MNIST standard)."""
@@ -75,6 +66,7 @@ def preprocess_image(image_base64, is_photo=False):
 
     cropped = image.crop(bbox)
     w, h = cropped.size
+
     if w < 6 or h < 6:
         return None, None
 
@@ -130,19 +122,14 @@ def predict():
     if tensor is None:
         return jsonify({'error': 'No clear digit found. Write bolder or use a darker marker!'}), 400
 
-    if USE_ONNX:
-        outputs = ort_session.run(None, {'input': tensor})[0][0]
-        # Softmax
-        exp = np.exp(outputs - np.max(outputs))
-        probabilities = exp / exp.sum()
-        prediction = int(np.argmax(probabilities))
-        confidence = float(probabilities[prediction] * 100)
-    else:
-        with torch.no_grad():
-            out = model(torch.tensor(tensor))
-            prob = F.softmax(out, dim=1)[0]
-            prediction = torch.argmax(prob).item()
-            confidence = float(prob[prediction] * 100)
+    # Run inference using ONNX
+    outputs = ort_session.run(None, {'input': tensor})[0][0]
+    
+    # Softmax to get probabilities
+    exp = np.exp(outputs - np.max(outputs))
+    probabilities = exp / exp.sum()
+    prediction = int(np.argmax(probabilities))
+    confidence = float(probabilities[prediction] * 100)
 
     return jsonify({
         'prediction': prediction,
