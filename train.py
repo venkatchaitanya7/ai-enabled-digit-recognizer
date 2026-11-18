@@ -4,6 +4,7 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from model import DigitCNN
 
+
 def train_and_export():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🚀 Training High-Accuracy Model on: {device}")
@@ -66,6 +67,7 @@ def train_and_export():
 
     # 1. Save PyTorch weights
     torch.save(model.state_dict(), 'digit_model.pth')
+    print("📦 Saved 'digit_model.pth'")
 
     # 2. Export to lightweight ONNX format
     model.eval()
@@ -81,7 +83,8 @@ def train_and_export():
         output_names=['output'],
         dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
     )
-    print("📦 Exported 'digit_model.onnx' (Ultra-lightweight for Render deployment)!")
+    print("📦 Exported 'digit_model.onnx' (Ultra-lightweight for deployment)!")
+
 
 if __name__ == '__main__':
     train_and_export()
