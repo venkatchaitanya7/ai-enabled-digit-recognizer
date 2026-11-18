@@ -1,6 +1,8 @@
 import io
 import base64
+import time
 import numpy as np
+from functools import wraps
 from PIL import Image, ImageOps, ImageFilter, ImageFile
 from flask import Flask, render_template, request, jsonify
 
@@ -8,12 +10,23 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 app = Flask(__name__)
 
-# Load Model: Try ONNX first, otherwise fallback to PyTorch
+# ===== Configuration =====
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX_REQUESTS = 30
+_request_timestamps = {}
+
+# ===== Load Model: Try ONNX first, otherwise fallback to PyTorch =====
 USE_ONNX = False
+MODEL_BACKEND = "pytorch"
+ort_session = None
+model = None
+device = None
+
 try:
     import onnxruntime as ort
     ort_session = ort.InferenceSession("digit_model.onnx")
     USE_ONNX = True
+    MODEL_BACKEND = "onnx"
     print("✅ Loaded ONNX Engine (Memory: ~35MB RAM)")
 except Exception as e:
     print(f"⚠️ ONNX failed to load, falling back to PyTorch: {e}")
@@ -24,7 +37,52 @@ except Exception as e:
     model = DigitCNN().to(device)
     model.load_state_dict(torch.load('digit_model.pth', map_location=device))
     model.eval()
+    print("✅ Loaded PyTorch Model")
 
+
+# ===== Rate Limiting Decorator =====
+def rate_limit(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        client_ip = request.remote_addr or "unknown"
+        now = time.time()
+        # Clean old entries
+        if client_ip in _request_timestamps:
+            _request_timestamps[client_ip] = [
+                ts for ts in _request_timestamps[client_ip]
+                if now - ts < RATE_LIMIT_WINDOW
+            ]
+        else:
+            _request_timestamps[client_ip] = []
+
+        if len(_request_timestamps[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+            return jsonify({"error": "Rate limit exceeded. Please slow down."}), 429
+
+        _request_timestamps[client_ip].append(now)
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ===== Security Headers =====
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # CSP: allow inline scripts/styles for our single-file template
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "media-src 'self'; "
+        "connect-src 'self'"
+    )
+    return response
+
+
+# ===== Image Preprocessing =====
 def get_center_of_mass(img_array):
     """Calculates the center of mass of the pixels (MNIST standard)."""
     cy, cx = np.indices(img_array.shape)
@@ -34,6 +92,7 @@ def get_center_of_mass(img_array):
     x_center = (cx * img_array).sum() / total
     y_center = (cy * img_array).sum() / total
     return x_center, y_center
+
 
 def shift_image(img_array, dx, dy):
     shifted = np.zeros_like(img_array)
@@ -48,6 +107,7 @@ def shift_image(img_array, dx, dy):
     src_y_end = min(h, h - int(dy))
     shifted[y_start:y_end, x_start:x_end] = img_array[src_y_start:src_y_end, src_x_start:src_x_end]
     return shifted
+
 
 def preprocess_image(image_base64, is_photo=False):
     image_bytes = base64.b64decode(image_base64.split(',')[1])
@@ -104,17 +164,32 @@ def preprocess_image(image_base64, is_photo=False):
     preview_img.save(buffered, format="PNG")
     debug_base64 = "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode()
 
-    # 7. Normalize
+    # 7. Normalize with MNIST stats
     normalized = (img_array / 255.0 - 0.1307) / 0.3081
     tensor = normalized.reshape(1, 1, 28, 28).astype(np.float32)
 
     return tensor, debug_base64
 
+
+# ===== Routes =====
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
+@app.route('/health')
+def health():
+    """Health check endpoint for load balancers and monitoring."""
+    return jsonify({
+        "status": "healthy",
+        "model_loaded": True,
+        "backend": MODEL_BACKEND,
+        "onnx_available": USE_ONNX
+    })
+
+
 @app.route('/predict', methods=['POST'])
+@rate_limit
 def predict():
     data = request.get_json()
     if not data or 'image' not in data:
@@ -148,5 +223,7 @@ def predict():
         'debug_image': debug_img
     })
 
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Development only - production uses gunicorn
+    app.run(debug=False, host='0.0.0.0', port=5000)
