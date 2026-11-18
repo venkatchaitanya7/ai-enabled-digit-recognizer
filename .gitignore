@@ -3,3 +3,15 @@ __pycache__/
 data/
 .vscode/
 
+# Model files (use Git LFS for large files)
+*.pth
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
