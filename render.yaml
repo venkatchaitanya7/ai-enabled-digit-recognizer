@@ -2,8 +2,18 @@ services:
   - type: web
     name: ai-enabled-digit-recognizer
     env: python
-    buildCommand: "pip install -r requirements.txt && python train.py"
-    startCommand: "gunicorn app:app"
+    buildCommand: |
+      pip install -r requirements.txt
+      # Only train if model files don't exist (first deploy)
+      if [ ! -f digit_model.pth ] || [ ! -f digit_model.onnx ]; then
+        echo "📦 Model files not found, training..."
+        python train.py
+      else
+        echo "✅ Model files found, skipping training"
+      fi
+    startCommand: gunicorn app:app --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
