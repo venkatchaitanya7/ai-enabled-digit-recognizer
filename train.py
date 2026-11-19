@@ -81,7 +81,8 @@ def train_and_export():
         do_constant_folding=True,
         input_names=['input'],
         output_names=['output'],
-        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
+        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
+        dynamo=False  # Crucial fix to disable the experimental compiler and export successfully!
     )
     print("📦 Exported 'digit_model.onnx' (Ultra-lightweight for deployment)!")
 
