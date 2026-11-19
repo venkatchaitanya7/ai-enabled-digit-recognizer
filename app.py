@@ -5,6 +5,7 @@ import numpy as np
 from functools import wraps
 from PIL import Image, ImageOps, ImageFilter, ImageFile
 from flask import Flask, render_template, request, jsonify
+import onnxruntime as ort
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -15,30 +16,12 @@ RATE_LIMIT_WINDOW = 60  # seconds
 RATE_LIMIT_MAX_REQUESTS = 30
 _request_timestamps = {}
 
-# ===== Load Model: Try ONNX first, otherwise fallback to PyTorch =====
-USE_ONNX = False
-MODEL_BACKEND = "pytorch"
-ort_session = None
-model = None
-device = None
-
+# ===== Load Model: Pure ONNX Runtime (< 35MB RAM) =====
 try:
-    import onnxruntime as ort
     ort_session = ort.InferenceSession("digit_model.onnx")
-    USE_ONNX = True
-    MODEL_BACKEND = "onnx"
     print("✅ Loaded ONNX Engine (Memory: ~35MB RAM)")
 except Exception as e:
-    print(f"⚠️ ONNX failed to load, falling back to PyTorch: {e}")
-    import torch
-    import torch.nn.functional as F
-    from model import DigitCNN
-    device = torch.device('cpu')
-    model = DigitCNN().to(device)
-    model.load_state_dict(torch.load('digit_model.pth', map_location=device))
-    model.eval()
-    print("✅ Loaded PyTorch Model")
-
+    print(f"❌ Failed to load ONNX model: {e}")
 
 # ===== Rate Limiting Decorator =====
 def rate_limit(f):
@@ -62,7 +45,6 @@ def rate_limit(f):
         return f(*args, **kwargs)
     return decorated
 
-
 # ===== Security Headers =====
 @app.after_request
 def add_security_headers(response):
@@ -70,7 +52,6 @@ def add_security_headers(response):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    # CSP: allow inline scripts/styles for our single-file template
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
@@ -80,7 +61,6 @@ def add_security_headers(response):
         "connect-src 'self'"
     )
     return response
-
 
 # ===== Image Preprocessing =====
 def get_center_of_mass(img_array):
@@ -92,7 +72,6 @@ def get_center_of_mass(img_array):
     x_center = (cx * img_array).sum() / total
     y_center = (cy * img_array).sum() / total
     return x_center, y_center
-
 
 def shift_image(img_array, dx, dy):
     shifted = np.zeros_like(img_array)
@@ -107,7 +86,6 @@ def shift_image(img_array, dx, dy):
     src_y_end = min(h, h - int(dy))
     shifted[y_start:y_end, x_start:x_end] = img_array[src_y_start:src_y_end, src_x_start:src_x_end]
     return shifted
-
 
 def preprocess_image(image_base64, is_photo=False):
     image_bytes = base64.b64decode(image_base64.split(',')[1])
@@ -170,23 +148,18 @@ def preprocess_image(image_base64, is_photo=False):
 
     return tensor, debug_base64
 
-
 # ===== Routes =====
 @app.route('/')
 def index():
     return render_template('index.html')
 
-
 @app.route('/health')
 def health():
-    """Health check endpoint for load balancers and monitoring."""
     return jsonify({
         "status": "healthy",
         "model_loaded": True,
-        "backend": MODEL_BACKEND,
-        "onnx_available": USE_ONNX
+        "backend": "onnx"
     })
-
 
 @app.route('/predict', methods=['POST'])
 @rate_limit
@@ -201,21 +174,12 @@ def predict():
     if tensor is None:
         return jsonify({'error': 'No clear digit found!'}), 400
 
-    if USE_ONNX:
-        outputs = ort_session.run(None, {'input': tensor})[0][0]
-        exp = np.exp(outputs - np.max(outputs))
-        probabilities = exp / exp.sum()
-        prediction = int(np.argmax(probabilities))
-        confidence = float(probabilities[prediction] * 100)
-    else:
-        # PyTorch Fallback Prediction
-        import torch
-        import torch.nn.functional as F
-        with torch.no_grad():
-            out = model(torch.tensor(tensor))
-            prob = F.softmax(out, dim=1)[0]
-            prediction = torch.argmax(prob).item()
-            confidence = float(prob[prediction] * 100)
+    # Run inference using ONNX
+    outputs = ort_session.run(None, {'input': tensor})[0][0]
+    exp = np.exp(outputs - np.max(outputs))
+    probabilities = exp / exp.sum()
+    prediction = int(np.argmax(probabilities))
+    confidence = float(probabilities[prediction] * 100)
 
     return jsonify({
         'prediction': prediction,
@@ -223,7 +187,5 @@ def predict():
         'debug_image': debug_img
     })
 
-
 if __name__ == '__main__':
-    # Development only - production uses gunicorn
     app.run(debug=False, host='0.0.0.0', port=5000)
